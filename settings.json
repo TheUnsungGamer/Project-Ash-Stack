@@ -1,0 +1,7 @@
+{
+  "lmstudio_url": "http://localhost:1234/v1",
+  "model": "mistral",
+  "tts_mode": "local",
+  "tts_url": "http://localhost:8000/tts",
+  "theme": "tech-priest-green"
+}
