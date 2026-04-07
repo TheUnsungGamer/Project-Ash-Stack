@@ -1,7 +1,8 @@
 from io import BytesIO
 from pathlib import Path
 import os
-import subprocess
+import time
+import uuid
 import tempfile
 import traceback
 import wave
@@ -18,7 +19,7 @@ from pydub.effects import compress_dynamic_range
 # =========================
 # APP INIT
 # =========================
-app = FastAPI(title="Tech Priest TTS (Piper -> RVC CLI -> Verity FX)")
+app = FastAPI(title="Tech Priest TTS (Piper -> RVC Bridge -> Verity FX)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -41,27 +42,14 @@ voice = PiperVoice.load(str(VOICE_MODEL_PATH))
 
 
 # =========================
-# RVC CONFIG
+# RVC BRIDGE CONFIG
 # =========================
-RVC_DIR = r"C:\Users\richa\Desktop\RVC-beta0717"
-RVC_INFER_CLI = r"C:\Users\richa\Desktop\RVC-beta0717\verity_infer.py"
-RVC_MODEL = os.path.join(RVC_DIR, "assets", "weights", "verity.pth")
+BRIDGE_INPUT   = Path(r"C:\rvc_bridge\input")
+BRIDGE_OUTPUT  = Path(r"C:\rvc_bridge\output")
+BRIDGE_TIMEOUT = 30
 
-# Leave blank if you do not have an index file
-RVC_INDEX = ""
-
-# RVC tuning
-RVC_PITCH = 0
-RVC_F0_METHOD = "rmvpe"
-RVC_INDEX_RATE = 0.75
-RVC_FILTER_RADIUS = 3
-RVC_RESAMPLE_SR = 0
-RVC_RMS_MIX_RATE = 0.25
-RVC_PROTECT = 0.33
-
-# Start with "cpu" to rule out CUDA issues. Switch to "cuda:0" once working.
-RVC_DEVICE = "cpu"
-RVC_IS_HALF = "False"  # Must be False when using CPU
+BRIDGE_INPUT.mkdir(parents=True, exist_ok=True)
+BRIDGE_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 
 # =========================
@@ -77,10 +65,8 @@ class TtsRequest(BaseModel):
 def get_piper_sample_rate() -> int:
     config = getattr(voice, "config", None)
     sample_rate = getattr(config, "sample_rate", None)
-
     if isinstance(sample_rate, int) and sample_rate > 0:
         return sample_rate
-
     return 22050
 
 
@@ -93,7 +79,6 @@ def run_piper_synthesize(text: str, wav_file) -> None:
             getattr(chunk, "audio_int16_bytes", None)
             or getattr(chunk, "audio_bytes", None)
         )
-
         if audio_bytes:
             wav_file.writeframes(audio_bytes)
             wrote_audio = True
@@ -105,7 +90,6 @@ def run_piper_synthesize(text: str, wav_file) -> None:
                 wav_file.writeframes(audio)
                 wrote_audio = True
                 continue
-
             if hasattr(audio, "tobytes"):
                 wav_file.writeframes(audio.tobytes())
                 wrote_audio = True
@@ -117,7 +101,6 @@ def run_piper_synthesize(text: str, wav_file) -> None:
 
 def synthesize_piper_wav_bytes(text: str) -> bytes:
     buffer = BytesIO()
-
     try:
         with wave.open(buffer, "wb") as wav_file:
             wav_file.setnchannels(1)
@@ -128,119 +111,40 @@ def synthesize_piper_wav_bytes(text: str) -> bytes:
         raise RuntimeError(f"Piper synthesis failed: {exc}") from exc
 
     wav_bytes = buffer.getvalue()
-
     if not wav_bytes:
         raise RuntimeError("Piper returned empty WAV bytes.")
-
     return wav_bytes
 
 
 # =========================
-# RVC CONVERSION (SUBPROCESS)
+# RVC CONVERSION (FILE BRIDGE)
 # =========================
 def apply_rvc_conversion(input_wav_bytes: bytes) -> bytes:
     if not input_wav_bytes:
         raise RuntimeError("Empty WAV passed to RVC.")
 
-    for label, path in [
-        ("RVC_DIR",       RVC_DIR),
-        ("RVC_PYTHON",    RVC_PYTHON),
-        ("RVC_INFER_CLI", RVC_INFER_CLI),
-        ("RVC_MODEL",     RVC_MODEL),
-    ]:
-        if not os.path.exists(path):
-            raise RuntimeError(f"{label} not found: {path}")
-
-    if RVC_INDEX and not os.path.exists(RVC_INDEX):
-        raise RuntimeError(f"RVC index not found: {RVC_INDEX}")
-
-    input_path = None
-    output_path = None
+    job_id   = uuid.uuid4().hex
+    in_path  = BRIDGE_INPUT  / f"{job_id}.wav"
+    out_path = BRIDGE_OUTPUT / f"{job_id}.wav"
 
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_in:
-            tmp_in.write(input_wav_bytes)
-            input_path = tmp_in.name
+        in_path.write_bytes(input_wav_bytes)
 
-        fd, output_path = tempfile.mkstemp(suffix=".wav")
-        os.close(fd)
-        os.remove(output_path)
+        deadline = time.time() + BRIDGE_TIMEOUT
+        while time.time() < deadline:
+            if out_path.exists() and out_path.stat().st_size > 0:
+                return out_path.read_bytes()
+            time.sleep(0.25)
 
-        index_path_arg = RVC_INDEX if RVC_INDEX else ""
-
-        cmd = [
-            RVC_PYTHON,
-            "-u",
-            os.path.abspath(RVC_INFER_CLI),
-            "--input_path", input_path,
-            "--opt_path", output_path,
-            "--model_name", RVC_MODEL,
-            "--f0up_key", str(RVC_PITCH),
-            "--f0method", RVC_F0_METHOD,
-            "--index_path", index_path_arg,
-            "--index_rate", str(RVC_INDEX_RATE),
-            "--filter_radius", str(RVC_FILTER_RADIUS),
-            "--resample_sr", str(RVC_RESAMPLE_SR),
-            "--rms_mix_rate", str(RVC_RMS_MIX_RATE),
-            "--protect", str(RVC_PROTECT),
-            "--device", RVC_DEVICE,
-            "--is_half", RVC_IS_HALF,
-        ]
-
-        print(f"[RVC] CMD: {' '.join(cmd)}", flush=True)
-
-        rvc_env = os.environ.copy()
-        rvc_env["PYTHONPATH"] = r"C:\Users\richa\Desktop\RVC-beta0717"
-
-        result = subprocess.run(
-            cmd,
-            cwd=r"C:\Users\richa\AppData\Local\Temp",
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env=rvc_env,
+        raise RuntimeError(
+            f"RVC bridge timed out after {BRIDGE_TIMEOUT}s. "
+            "Is verity_watcher.py running?"
         )
-
-        if result.stdout:
-            print(f"[RVC STDOUT]\n{result.stdout}", flush=True)
-        if result.stderr:
-            print(f"[RVC STDERR]\n{result.stderr}", flush=True)
-
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"RVC subprocess exited with code {result.returncode}.\n"
-                f"CMD: {' '.join(cmd)}\n"
-                f"STDOUT:\n{result.stdout}\n"
-                f"STDERR:\n{result.stderr}"
-            )
-
-        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-            raise RuntimeError(
-                "RVC exited cleanly (rc=0) but produced no output file.\n"
-                f"CMD: {' '.join(cmd)}\n"
-                f"STDOUT:\n{result.stdout}\n"
-                f"STDERR:\n{result.stderr}"
-            )
-
-        with open(output_path, "rb") as f:
-            converted = f.read()
-
-        if not converted:
-            raise RuntimeError("RVC output WAV was empty after reading.")
-
-        return converted
-
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("RVC subprocess timed out (300s). Consider switching to GPU.") from exc
-    except RuntimeError:
-        raise
-    except Exception as exc:
-        raise RuntimeError(f"RVC conversion failed unexpectedly: {exc}") from exc
     finally:
-        for path in (input_path, output_path):
-            if path and os.path.exists(path):
+        for p in (in_path, out_path):
+            if p.exists():
                 try:
-                    os.remove(path)
+                    p.unlink()
                 except Exception:
                     pass
 
@@ -291,15 +195,11 @@ def apply_verity_effect(wav_bytes: bytes) -> bytes:
 async def health():
     return {
         "status": "ok",
-        "pipeline": "Piper -> RVC CLI -> Verity FX",
+        "pipeline": "Piper -> RVC Bridge -> Verity FX",
         "voice": VOICE_MODEL_PATH.name,
-        "rvc_dir": RVC_DIR,
-        "rvc_python": RVC_PYTHON,
-        "rvc_infer_cli": RVC_INFER_CLI,
-        "rvc_model": RVC_MODEL,
-        "rvc_index": RVC_INDEX or "(none)",
-        "rvc_device": RVC_DEVICE,
-        "rvc_is_half": RVC_IS_HALF,
+        "bridge_input": str(BRIDGE_INPUT),
+        "bridge_output": str(BRIDGE_OUTPUT),
+        "bridge_timeout": BRIDGE_TIMEOUT,
     }
 
 
@@ -307,7 +207,7 @@ async def health():
 async def tts(payload: TtsRequest):
     try:
         piper_audio = synthesize_piper_wav_bytes(payload.text)
-        rvc_audio = apply_rvc_conversion(piper_audio)
+        rvc_audio   = apply_rvc_conversion(piper_audio)
         final_audio = apply_verity_effect(rvc_audio)
 
         return Response(
