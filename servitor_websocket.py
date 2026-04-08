@@ -34,7 +34,7 @@ app.add_middleware(
 # =============================================================================
 
 LM_STUDIO_URL = "http://127.0.0.1:1234/v1/chat/completions"  # Both models served here
-TTS_URL = "http://127.0.0.1:8000/synthesize"  # Tech-Priest TTS
+TTS_URL = "http://127.0.0.1:8000/tts"  # Tech-Priest TTS
 
 # Check LM Studio for exact model names - they appear in the model dropdown
 VERITY_MODEL = "mistral-7b-instruct"          # Your main model
@@ -300,15 +300,39 @@ def parse_servitor_output(raw: str, context: str) -> dict:
     return result
 
 
-async def send_to_tts(text: str) -> dict:
-    """Send text to Tech-Priest TTS server."""
-    async with httpx.AsyncClient(timeout=60) as client:
+async def send_to_tts(text: str, voice: str = "verity") -> bytes:
+    """Send text to Tech-Priest TTS server and get audio bytes back."""
+    async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(TTS_URL, json={
             "text": text,
-            "voice": "verity"  # Adjust to your voice config
+            "voice": voice
         })
         response.raise_for_status()
-        return response.json()
+        return response.content  # Returns WAV bytes
+
+
+def format_servitor_speech(result: dict) -> str:
+    """Format Servitor result as speakable text."""
+    parts = []
+    
+    if result["status"] == "CRITICAL":
+        parts.append("CRITICAL ALERT.")
+    elif result["status"] == "REVIEW":
+        parts.append("STATUS REVIEW.")
+    
+    if result["deficiency"]:
+        parts.append(result["deficiency"])
+    
+    if result["amendment"]:
+        parts.append(f"Amendment: {result['amendment']}")
+    
+    if result["mortality_estimate"] is not None:
+        parts.append(f"Mortality estimate: {int(result['mortality_estimate'])} percent.")
+    
+    if result["recommended_action"]:
+        parts.append(f"Recommended action: {result['recommended_action']}")
+    
+    return " ".join(parts)
 
 
 # =============================================================================
@@ -355,8 +379,8 @@ async def websocket_chat(websocket: WebSocket):
             # =================================================================
             servitor_triggered = should_trigger_servitor(user_input, verity_response)
             
-            # Create tasks
-            tts_task = asyncio.create_task(send_to_tts(verity_response))
+            # Create tasks - Verity TTS starts immediately
+            verity_tts_task = asyncio.create_task(send_to_tts(verity_response, voice="verity"))
             servitor_task = None
             
             if servitor_triggered:
@@ -371,14 +395,19 @@ async def websocket_chat(websocket: WebSocket):
                 })
             
             # =================================================================
-            # STEP 3: Handle TTS result
+            # STEP 3: Handle Verity TTS result
             # =================================================================
             try:
-                tts_result = await tts_task
+                verity_audio = await verity_tts_task
+                
+                # Send audio as base64 for frontend playback
+                import base64
+                audio_b64 = base64.b64encode(verity_audio).decode('utf-8')
+                
                 await websocket.send_json({
                     "type": "verity_audio",
-                    "audio_url": tts_result.get("audio_url"),
-                    "duration_seconds": tts_result.get("duration"),
+                    "audio_data": audio_b64,
+                    "format": "wav",
                     "timestamp": timestamp
                 })
             except Exception as e:
@@ -395,8 +424,15 @@ async def websocket_chat(websocket: WebSocket):
                 try:
                     servitor_result = await servitor_task
                     
-                    # Only send if NOT optimal (don't clutter UI with approvals)
+                    # Only process if NOT optimal
                     if servitor_result["status"] != "OPTIMAL":
+                        # Generate Servitor TTS with servitor voice
+                        servitor_speech = format_servitor_speech(servitor_result)
+                        servitor_audio = await send_to_tts(servitor_speech, voice="servitor")
+                        
+                        import base64
+                        servitor_audio_b64 = base64.b64encode(servitor_audio).decode('utf-8')
+                        
                         await websocket.send_json({
                             "type": "servitor_result",
                             "status": servitor_result["status"],
@@ -406,6 +442,8 @@ async def websocket_chat(websocket: WebSocket):
                             "deficiency": servitor_result["deficiency"],
                             "amendment": servitor_result["amendment"],
                             "recommended_action": servitor_result["recommended_action"],
+                            "audio_data": servitor_audio_b64,
+                            "audio_format": "wav",
                             "timestamp": timestamp
                         })
                     else:
