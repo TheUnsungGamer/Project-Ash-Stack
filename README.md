@@ -1,12 +1,10 @@
 # Ash — Local AI Terminal Interface
-
 A browser-based tactical UI for chatting with a local AI model via LM Studio.  
 Dark green-on-black terminal aesthetic. Streaming responses. Voice output via a local TTS backend.
 
 ---
 
 ## Stack
-
 | Layer | Tech |
 |---|---|
 | Frontend | React + TypeScript + Vite |
@@ -16,7 +14,6 @@ Dark green-on-black terminal aesthetic. Streaming responses. Voice output via a 
 ---
 
 ## Project Structure
-
 ```
 ash/
 ├── src/                  # React/TypeScript frontend
@@ -39,19 +36,16 @@ ash/
 ## Getting Started
 
 ### 1. Frontend
-
 ```bash
 npm install
 npm run dev
 ```
 
 ### 2. LM Studio
-
 - Load your model (e.g. Mistral)
 - Enable the local server on `http://localhost:1234`
 
 ### 3. TTS Backend (optional)
-
 ```bash
 cd tech-priest-tts
 python -m venv .venv
@@ -63,9 +57,7 @@ python server.py
 ---
 
 ## Configuration
-
 Edit `settings.json` to point at your LM Studio instance and set voice preferences:
-
 ```json
 {
   "lmstudio_url": "http://localhost:1234/v1",
@@ -77,7 +69,6 @@ Edit `settings.json` to point at your LM Studio instance and set voice preferenc
 ---
 
 ## Voice Modes
-
 | Mode | Description |
 |---|---|
 | `browser` | Uses Web Speech API (no extra setup) |
@@ -85,8 +76,27 @@ Edit `settings.json` to point at your LM Studio instance and set voice preferenc
 
 ---
 
-## Notes
+## External Dependencies
 
+### Planetiler
+
+Map tile generation requires [Planetiler](https://github.com/onthegomap/planetiler), which is excluded from this repository to prevent binary bloat.
+
+**Setup:**
+
+Download the latest `planetiler.jar` from the [Planetiler releases page](https://github.com/onthegomap/planetiler/releases) and place it in the project root or a `/bin` directory.
+
+**Usage:**
+
+```bash
+java -jar planetiler.jar --download --area=monaco
+```
+
+**Note:** `.jar` files are explicitly excluded via `.gitignore` in accordance with repository management best practices.
+
+---
+
+## Notes
 - `.venv/` is gitignored — run the setup steps above after cloning
 - Audio output files are gitignored (`*.wav`, `*.mp3`)
 - See `settings.json` for runtime tunables
