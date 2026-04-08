@@ -1,4 +1,5 @@
 # Ash — Local AI Terminal Interface
+<<<<<<< HEAD
 
 A browser-based tactical UI for chatting with a local AI, with an offline vector map, voice synthesis, and a Warhammer 40K aesthetic.
 
@@ -46,6 +47,15 @@ Installed via `pip install -r tech-priest-tts/requirements.txt`:
 Located in `C:\Users\richa\Desktop\planetpiler\`:
 
 | File | Purpose |
+=======
+A browser-based tactical UI for chatting with a local AI model via LM Studio.  
+Dark green-on-black terminal aesthetic. Streaming responses. Voice output via a local TTS backend.
+
+---
+
+## Stack
+| Layer | Tech |
+>>>>>>> aac2bfa12d27133175b12873899c8fb709ce4a68
 |---|---|
 | `planetiler.jar` | Generates `.pmtiles` from OSM data (JDK 21 required) |
 | `pmtiles.exe` | Inspect/verify `.pmtiles` files |
@@ -58,6 +68,7 @@ Located in `C:\Users\richa\Desktop\planetpiler\`:
 
 ---
 
+<<<<<<< HEAD
 ## Ports
 
 | Port | Service | Notes |
@@ -66,19 +77,50 @@ Located in `C:\Users\richa\Desktop\planetpiler\`:
 | 8000 | TTS server | Piper → RVC → Verity pipeline |
 | 8080 | Tile server | Serves `map.html` + `us.pmtiles` |
 | 5173 | Ash frontend | Vite dev server |
+=======
+## Project Structure
+```
+ash/
+├── src/                  # React/TypeScript frontend
+│   ├── components/       # UI components (chat window, input, etc.)
+│   ├── hooks/            # Custom hooks (useChat, useTTS, etc.)
+│   ├── types/            # Shared TypeScript types
+│   └── App.tsx
+│
+├── tech-priest-tts/      # Python TTS backend
+│   ├── server.py         # Flask/FastAPI server
+│   └── requirements.txt
+│
+├── public/               # Static assets
+├── settings.json         # Runtime config (LM Studio URL, model, voice mode)
+└── .env.example          # Template for any env vars
+```
+>>>>>>> aac2bfa12d27133175b12873899c8fb709ce4a68
 
 ---
 
 ## Setup
 
+<<<<<<< HEAD
 ### 1. Install frontend dependencies
 
+=======
+### 1. Frontend
+>>>>>>> aac2bfa12d27133175b12873899c8fb709ce4a68
 ```bash
 npm install
 ```
 
+<<<<<<< HEAD
 ### 2. Set up TTS server
 
+=======
+### 2. LM Studio
+- Load your model (e.g. Mistral)
+- Enable the local server on `http://localhost:1234`
+
+### 3. TTS Backend (optional)
+>>>>>>> aac2bfa12d27133175b12873899c8fb709ce4a68
 ```bash
 cd tech-priest-tts
 python -m venv .venv
@@ -92,6 +134,7 @@ tech-priest-tts/models/en_GB-jenny_dioco-medium.onnx
 tech-priest-tts/models/en_GB-jenny_dioco-medium.onnx.json
 ```
 
+<<<<<<< HEAD
 ### 3. Set up RVC bridge (optional voice cloning)
 
 The TTS pipeline routes audio through an RVC file bridge:
@@ -112,6 +155,10 @@ If you are not using RVC, set `tts_mode` to `browser` in `settings.json` to use 
 
 Edit `settings.json`:
 
+=======
+## Configuration
+Edit `settings.json` to point at your LM Studio instance and set voice preferences:
+>>>>>>> aac2bfa12d27133175b12873899c8fb709ce4a68
 ```json
 {
   "lmstudio_url": "http://localhost:1234/v1",
@@ -168,6 +215,7 @@ java -jar planetiler.jar --download --area=us --output=us.pmtiles
 ---
 
 ## Voice Modes
+<<<<<<< HEAD
 
 | Mode | Description | Requirements |
 |---|---|---|
@@ -203,3 +251,36 @@ Project-Ash-Stack/
 ├── start.bat             # One-click launcher
 └── README.md
 ```
+=======
+| Mode | Description |
+|---|---|
+| `browser` | Uses Web Speech API (no extra setup) |
+| `local` | Routes through the tech-priest-tts Python backend |
+
+---
+
+## External Dependencies
+
+### Planetiler
+
+Map tile generation requires [Planetiler](https://github.com/onthegomap/planetiler), which is excluded from this repository to prevent binary bloat.
+
+**Setup:**
+
+Download the latest `planetiler.jar` from the [Planetiler releases page](https://github.com/onthegomap/planetiler/releases) and place it in the project root or a `/bin` directory.
+
+**Usage:**
+
+```bash
+java -jar planetiler.jar --download --area=monaco
+```
+
+**Note:** `.jar` files are explicitly excluded via `.gitignore` in accordance with repository management best practices.
+
+---
+
+## Notes
+- `.venv/` is gitignored — run the setup steps above after cloning
+- Audio output files are gitignored (`*.wav`, `*.mp3`)
+- See `settings.json` for runtime tunables
+>>>>>>> aac2bfa12d27133175b12873899c8fb709ce4a68
