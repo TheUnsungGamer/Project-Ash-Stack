@@ -10,7 +10,7 @@ export function MapPanel() {
       >
         {/* 🔥 MAP IFRAME */}
         <iframe
-          src="http://localhost:8080/map.html"
+          src="http://localhost:8081/map.html"
           style={{
             position: "absolute",
             inset: 0,
