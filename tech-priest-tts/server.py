@@ -19,7 +19,7 @@ from pydub.effects import compress_dynamic_range
 # =========================
 # APP INIT
 # =========================
-app = FastAPI(title="Tech Priest TTS (Piper -> RVC Bridge -> Verity FX)")
+app = FastAPI(title="Tech Priest TTS (Piper -> RVC Bridge -> Dual Voice)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,6 +57,7 @@ BRIDGE_OUTPUT.mkdir(parents=True, exist_ok=True)
 # =========================
 class TtsRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
+    voice: str = Field(default="verity")  # "verity" or "servitor"
 
 
 # =========================
@@ -119,13 +120,20 @@ def synthesize_piper_wav_bytes(text: str) -> bytes:
 # =========================
 # RVC CONVERSION (FILE BRIDGE)
 # =========================
-def apply_rvc_conversion(input_wav_bytes: bytes) -> bytes:
+def apply_rvc_conversion(input_wav_bytes: bytes, voice_type: str = "verity") -> bytes:
     if not input_wav_bytes:
         raise RuntimeError("Empty WAV passed to RVC.")
 
-    job_id   = uuid.uuid4().hex
-    in_path  = BRIDGE_INPUT  / f"{job_id}.wav"
-    out_path = BRIDGE_OUTPUT / f"{job_id}.wav"
+    job_id = uuid.uuid4().hex
+    
+    # Prefix with servitor_ if it's the servitor voice
+    if voice_type == "servitor":
+        filename = f"servitor_{job_id}.wav"
+    else:
+        filename = f"{job_id}.wav"
+    
+    in_path  = BRIDGE_INPUT  / filename
+    out_path = BRIDGE_OUTPUT / filename
 
     try:
         in_path.write_bytes(input_wav_bytes)
@@ -150,7 +158,7 @@ def apply_rvc_conversion(input_wav_bytes: bytes) -> bytes:
 
 
 # =========================
-# VERITY FX
+# VERITY FX (warm, intimate)
 # =========================
 def apply_verity_effect(wav_bytes: bytes) -> bytes:
     try:
@@ -189,14 +197,61 @@ def apply_verity_effect(wav_bytes: bytes) -> bytes:
 
 
 # =========================
+# SERVITOR FX (cold, mechanical, vox-distorted)
+# =========================
+def apply_servitor_effect(wav_bytes: bytes) -> bytes:
+    try:
+        audio = AudioSegment.from_file(BytesIO(wav_bytes), format="wav")
+    except Exception as exc:
+        raise RuntimeError(f"Could not load WAV: {exc}") from exc
+
+    audio = audio.set_channels(1)
+    
+    # Harsher high-pass for that thin vox-caster sound
+    audio = audio.high_pass_filter(300)
+    audio = audio.low_pass_filter(3500)
+
+    # Heavy compression for flat, mechanical delivery
+    audio = compress_dynamic_range(
+        audio,
+        threshold=-15.0,
+        ratio=8.0,
+        attack=2.0,
+        release=30.0,
+    )
+
+    # Add some grit/distortion by boosting mids
+    mid_boost = audio.high_pass_filter(800).low_pass_filter(2000) + 8
+    audio = audio.overlay(mid_boost)
+
+    # Slight robotic pitch warble
+    original_rate = audio.frame_rate
+    audio = audio._spawn(
+        audio.raw_data,
+        overrides={"frame_rate": int(original_rate * 0.98)},
+    ).set_frame_rate(original_rate)
+
+    # Short metallic echo
+    echo = audio - 18
+    audio = audio.overlay(echo, position=25)
+
+    audio = audio.normalize(headroom=0.5)
+
+    out = BytesIO()
+    audio.export(out, format="wav")
+    return out.getvalue()
+
+
+# =========================
 # ROUTES
 # =========================
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
-        "pipeline": "Piper -> RVC Bridge -> Verity FX",
-        "voice": VOICE_MODEL_PATH.name,
+        "pipeline": "Piper -> RVC Bridge -> Dual Voice FX",
+        "voices": ["verity", "servitor"],
+        "voice_model": VOICE_MODEL_PATH.name,
         "bridge_input": str(BRIDGE_INPUT),
         "bridge_output": str(BRIDGE_OUTPUT),
         "bridge_timeout": BRIDGE_TIMEOUT,
@@ -206,15 +261,27 @@ async def health():
 @app.post("/tts")
 async def tts(payload: TtsRequest):
     try:
+        voice_type = payload.voice.lower()
+        
+        # Generate base audio with Piper
         piper_audio = synthesize_piper_wav_bytes(payload.text)
-        rvc_audio   = apply_rvc_conversion(piper_audio)
-        final_audio = apply_verity_effect(rvc_audio)
+        
+        # Send through RVC bridge (filename prefix triggers correct voice)
+        rvc_audio = apply_rvc_conversion(piper_audio, voice_type)
+        
+        # Apply voice-specific effects
+        if voice_type == "servitor":
+            final_audio = apply_servitor_effect(rvc_audio)
+            filename = "servitor.wav"
+        else:
+            final_audio = apply_verity_effect(rvc_audio)
+            filename = "verity.wav"
 
         return Response(
             content=final_audio,
             media_type="audio/wav",
             headers={
-                "Content-Disposition": 'inline; filename="verity.wav"',
+                "Content-Disposition": f'inline; filename="{filename}"',
                 "Cache-Control": "no-store",
             },
         )
@@ -222,3 +289,18 @@ async def tts(payload: TtsRequest):
     except Exception as exc:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# =========================
+# DIRECT ENDPOINT FOR SERVITOR (convenience)
+# =========================
+@app.post("/tts/servitor")
+async def tts_servitor(payload: TtsRequest):
+    payload.voice = "servitor"
+    return await tts(payload)
+
+
+@app.post("/tts/verity")
+async def tts_verity(payload: TtsRequest):
+    payload.voice = "verity"
+    return await tts(payload)
