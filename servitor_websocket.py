@@ -209,12 +209,14 @@ async def call_verity(user_input: str, system_prompt: str = None) -> str:
 You provide clear, actionable information. You are warm but precise.
 When discussing technical, survival, or tactical topics, be thorough about risks and requirements."""
 
+    # Merge system prompt into user message (LM Studio doesn't support system role)
+    combined_prompt = f"{system_prompt}\n\nUser: {user_input}"
+
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(LM_STUDIO_URL, json={
             "model": VERITY_MODEL,
             "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_input}
+                {"role": "user", "content": combined_prompt}
             ],
             "temperature": 0.7,
             "max_tokens": 1024
@@ -226,7 +228,10 @@ When discussing technical, survival, or tactical topics, be thorough about risks
 async def call_servitor(user_input: str, verity_response: str) -> dict:
     """Call Servitor (audit LLM) via LM Studio - same server, different model."""
     
-    audit_prompt = f"""++INCOMING TRANSMISSION++
+    # Merge system prompt and audit prompt (LM Studio doesn't support system role)
+    combined_prompt = f"""{SERVITOR_SYSTEM_PROMPT}
+
+++INCOMING TRANSMISSION++
 
 ORIGINAL QUERY FROM OPERATOR:
 {user_input}
@@ -240,8 +245,7 @@ VERITY UNIT RESPONSE:
         response = await client.post(LM_STUDIO_URL, json={
             "model": SERVITOR_MODEL,
             "messages": [
-                {"role": "system", "content": SERVITOR_SYSTEM_PROMPT},
-                {"role": "user", "content": audit_prompt}
+                {"role": "user", "content": combined_prompt}
             ],
             "temperature": 0.2,  # Low temp for precise output
             "max_tokens": 200    # Servitor responses are short
