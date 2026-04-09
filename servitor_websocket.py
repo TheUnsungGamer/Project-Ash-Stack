@@ -37,7 +37,7 @@ LM_STUDIO_URL = "http://127.0.0.1:1234/v1/chat/completions"  # Both models serve
 TTS_URL = "http://127.0.0.1:8000/tts"  # Tech-Priest TTS
 
 # Check LM Studio for exact model names - they appear in the model dropdown
-VERITY_MODEL = "mistral-7b-instruct"          # Your main model
+VERITY_MODEL = "mistralai/mistral-7b-instruct-v0.3"          # Your main model
 SERVITOR_MODEL = "qwen2.5-0.5b-instruct"      # Lightweight audit model
 
 # =============================================================================
