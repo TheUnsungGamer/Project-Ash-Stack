@@ -1,7 +1,7 @@
 import { useState } from "react";
 import "./styles/global.css";
 import { initialLogs } from "./constants/initialLogs";
-
+import ServitorPanel from './components/ServitorPanel';
 import { useAudioController } from "./hooks/useAudioController";
 import { useChat } from "./hooks/useChat";
 import { starterMessages } from "./constants/starterMessages";
@@ -30,6 +30,9 @@ export default function App() {
     errorMessage,
     setSelectedModel,
     sendMessage,
+    servitorResult,
+    servitorPending,
+    dismissServitor,
   } = useChat({
     initialMessages: starterMessages,
     onAssistantMessageComplete: async (message) => {
@@ -103,6 +106,12 @@ export default function App() {
   onSpeakMessage={(message) =>
     void handleSpeakMessage(message.content, message.id)
   }
+/>
+    <ServitorPanel
+  result={servitorResult}
+  isVisible={servitorResult !== null || servitorPending}
+  isPending={servitorPending}
+  onDismiss={dismissServitor}
 />
       </MainPanel>
     </AppShell>
