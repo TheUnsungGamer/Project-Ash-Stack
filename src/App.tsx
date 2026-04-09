@@ -1,7 +1,7 @@
 import { useState } from "react";
 import "./styles/global.css";
 import { initialLogs } from "./constants/initialLogs";
-import ServitorPanel from './components/ServitorPanel';
+import ServitorPanel from './components/ServitorPanel.tsx';
 import { useAudioController } from "./hooks/useAudioController";
 import { useChat } from "./hooks/useChat";
 import { starterMessages } from "./constants/starterMessages";
@@ -38,6 +38,12 @@ export default function App() {
     onAssistantMessageComplete: async (message) => {
       pushLog("[LLM] Response complete");
       await audioController.speak(message.content, message.id);
+    },
+     onServitorAudio: (audioData) => {
+    pushLog("[SRV] Servitor audio received");
+        
+        const audio = new Audio(`data:audio/wav;base64,${audioData}`);
+        audio.play();
     },
   });
 
