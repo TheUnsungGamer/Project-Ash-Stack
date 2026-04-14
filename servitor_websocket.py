@@ -342,6 +342,7 @@ def format_servitor_speech(result: dict) -> str:
 # Per-connection active task handle. Only one pending cycle allowed at a time.
 # Keyed by websocket object to support multiple simultaneous clients if needed.
 _active_tasks: dict[int, asyncio.Task] = {}
+_playback_events: dict[int, asyncio.Event] = {}
 
 
 async def _process_cycle(
@@ -349,6 +350,7 @@ async def _process_cycle(
     user_input: str,
     request_id: str,
     timestamp: str,
+    playback_event: asyncio.Event,
 ) -> None:
     """
     Full request/response cycle for one user message.
@@ -447,23 +449,18 @@ async def _process_cycle(
         except asyncio.CancelledError:
             return
 
-        # Spin-wait for playback_complete.
-        # Accept ANY playback_complete on this connection — strict ID matching
-        # caused the gate to never open because the frontend's onended fires
-        # slightly after the next cycle has already been accepted and stamped
-        # with a new request_id.
-        # Safety: if the user sends a new message, _active_tasks cancels this
-        # task entirely so we never incorrectly unlock a different cycle.
+        # Wait for the playback_complete gate using an asyncio.Event.
+        # The outer websocket_chat loop sets this event when it receives
+        # a playback_complete frame — avoiding the two-reader race condition
+        # where both the outer loop and this spin-wait competed for the same
+        # WebSocket message.
         try:
-            while True:
-                incoming = await websocket.receive_json()
-                if incoming.get("type") == "playback_complete":
-                    break
-                # Any unrecognised message during the wait: discard and keep waiting
+            await asyncio.wait_for(playback_event.wait(), timeout=60.0)
+        except asyncio.TimeoutError:
+            # Frontend never sent playback_complete — proceed anyway
+            pass
         except asyncio.CancelledError:
             return
-        except Exception:
-            return  # WebSocket dropped or malformed message
 
         # ------------------------------------------------------------------
         # STEP 6: Servitor inference — VRAM is now free (Verity fully done)
@@ -542,10 +539,12 @@ async def websocket_chat(websocket: WebSocket):
             data = await websocket.receive_json()
             user_input = data.get("message", "").strip()
 
-            # Passthrough for playback_complete acks — handled inside _process_cycle
+            # playback_complete sets the event that unblocks the active cycle's
+            # Servitor gate — avoids the two-reader race on the WebSocket.
             if data.get("type") == "playback_complete":
-                # These are consumed inside the running task's wait-loop.
-                # If no task is running (e.g. timing edge case), just discard.
+                active_event = _playback_events.get(conn_id)
+                if active_event:
+                    active_event.set()
                 continue
 
             if not user_input:
@@ -579,22 +578,25 @@ async def websocket_chat(websocket: WebSocket):
             # ----------------------------------------------------------------
             # Launch the new cycle as a cancellable task
             # ----------------------------------------------------------------
+            playback_event = asyncio.Event()
+            _playback_events[conn_id] = playback_event
             task = asyncio.create_task(
-                _process_cycle(websocket, user_input, request_id, timestamp)
+                _process_cycle(websocket, user_input, request_id, timestamp, playback_event)
             )
             _active_tasks[conn_id] = task
 
     except WebSocketDisconnect:
-        # Clean up on disconnect
         existing = _active_tasks.pop(conn_id, None)
         if existing and not existing.done():
             existing.cancel()
+        _playback_events.pop(conn_id, None)
         print(f"Client {conn_id} disconnected.")
 
     except Exception as e:
         existing = _active_tasks.pop(conn_id, None)
         if existing and not existing.done():
             existing.cancel()
+        _playback_events.pop(conn_id, None)
         print(f"WebSocket error for {conn_id}: {e}")
 
 
