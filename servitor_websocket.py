@@ -191,7 +191,7 @@ async def call_verity(user_input: str, system_prompt: str = None) -> str:
                 "model": VERITY_MODEL,
                 "messages": [{"role": "user", "content": combined_prompt}],
                 "temperature": 0.7,
-                "max_tokens": 150,
+                "max_tokens": 1024,
             })
             response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"].strip()
@@ -447,15 +447,17 @@ async def _process_cycle(
         except asyncio.CancelledError:
             return
 
-        # Spin-wait for playback_complete — any other message type is ignored
-        # (A new user message will cancel this task entirely via _active_tasks)
+        # Spin-wait for playback_complete.
+        # Accept ANY playback_complete on this connection — strict ID matching
+        # caused the gate to never open because the frontend's onended fires
+        # slightly after the next cycle has already been accepted and stamped
+        # with a new request_id.
+        # Safety: if the user sends a new message, _active_tasks cancels this
+        # task entirely so we never incorrectly unlock a different cycle.
         try:
             while True:
                 incoming = await websocket.receive_json()
-                if (
-                    incoming.get("type") == "playback_complete"
-                    and incoming.get("request_id") == request_id
-                ):
+                if incoming.get("type") == "playback_complete":
                     break
                 # Any unrecognised message during the wait: discard and keep waiting
         except asyncio.CancelledError:
