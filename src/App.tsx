@@ -169,7 +169,7 @@ export default function App() {
     sendPlaybackComplete,
   } = useChat({
     initialMessages: starterMessages,
-    onAssistantMessageComplete: (message) => {
+    onAssistantMessageComplete: () => {
       pushLog("[LLM] Response complete");
       // audioController.speak() removed — verity_audio WebSocket frame is the
       // single source of truth for playback. Calling speak() here caused Verity
