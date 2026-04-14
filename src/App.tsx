@@ -52,6 +52,9 @@ export default function App() {
     }
   }
 
+  // Pause before Servitor speaks — lets Verity's words land before the interrupt
+  const SERVITOR_INTRO_PAUSE_MS = 1800;
+
   function playNextInQueue() {
     clearForceReleaseTimer();
 
@@ -61,8 +64,24 @@ export default function App() {
       return;
     }
 
+    const entry = audioQueueRef.current[0]!;
+
+    // If the next item is Servitor audio, hold briefly before playing.
+    // This gives the operator a beat of silence after Verity finishes — the
+    // "Prime Directive override" line hits harder after a pause.
+    if (entry.source === "Servitor") {
+      setTimeout(() => {
+        if (audioQueueRef.current.length === 0) return; // cancelled in the gap
+        playItem(audioQueueRef.current.shift()!);
+      }, SERVITOR_INTRO_PAUSE_MS);
+      return;
+    }
+
+    playItem(audioQueueRef.current.shift()!);
+  }
+
+  function playItem(entry: QueueEntry) {
     isPlayingRef.current = true;
-    const entry = audioQueueRef.current.shift()!;
     const { audioData, source, requestId } = entry;
 
     const audio = new Audio(`data:audio/wav;base64,${audioData}`);
@@ -150,9 +169,11 @@ export default function App() {
     sendPlaybackComplete,
   } = useChat({
     initialMessages: starterMessages,
-    onAssistantMessageComplete: async (message) => {
+    onAssistantMessageComplete: (message) => {
       pushLog("[LLM] Response complete");
-      await audioController.speak(message.content, message.id);
+      // audioController.speak() removed — verity_audio WebSocket frame is the
+      // single source of truth for playback. Calling speak() here caused Verity
+      // to hit the TTS server independently, duplicating audio every response.
     },
     // requestId is now passed through so the queue can ack the right cycle
     onVerityAudio: (audioData, requestId) => {
