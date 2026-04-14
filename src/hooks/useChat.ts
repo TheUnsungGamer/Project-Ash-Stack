@@ -153,13 +153,22 @@ export function useChat({
     }) => {
       const incomingId = data.request_id ?? null;
 
-      // Ghost-frame guard: drop any frame from a cycle that's no longer active.
-      // Exemptions: request_accepted sets the new active ID, errors always surface.
+      // Ghost-frame guard: drop frames from cancelled/stale cycles.
+      // Exemptions:
+      //   - request_accepted: sets the new active ID, must always land
+      //   - verity_text/verity_audio: arrive immediately after request_accepted
+      //     and may race it in the same WebSocket flush — always accept them
+      //   - error: always surface regardless of cycle
+      const RACE_EXEMPT = new Set([
+        "request_accepted",
+        "verity_text",
+        "verity_audio",
+        "error",
+      ]);
       if (
         incomingId !== null &&
         incomingId !== currentRequestIdRef.current &&
-        data.type !== "request_accepted" &&
-        data.type !== "error"
+        !RACE_EXEMPT.has(data.type)
       ) {
         console.log(
           `[Ash] Ghost frame dropped — type: ${data.type}, id: ${incomingId} (active: ${currentRequestIdRef.current})`
