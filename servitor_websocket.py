@@ -191,7 +191,7 @@ async def call_verity(user_input: str, system_prompt: str = None) -> str:
                 "model": VERITY_MODEL,
                 "messages": [{"role": "user", "content": combined_prompt}],
                 "temperature": 0.7,
-                "max_tokens": 1024,
+                "max_tokens": 300,
             })
             response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"].strip()
