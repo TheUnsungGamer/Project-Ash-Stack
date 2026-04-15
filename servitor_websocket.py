@@ -1,14 +1,13 @@
 """
-Project Ash - WebSocket Backend (Hardened)
-Sequential Verity + Servitor processing with state-locked handshake
+Project Ash - WebSocket Backend (v3 - Hardened + Accurate Mortality)
+Sequential Verity + Servitor processing with state-locked handshake.
 
-Architecture (v2 - Production Hardened):
-- Verity generates response (fully awaited before Servitor starts)
-- TTS fires immediately after Verity text is complete
-- Backend HOLDS Servitor payload until frontend confirms playback_complete
-- Active task cancellation on new message arrival
-- UUID-tagged message cycles to suppress ghost audio
-- No blocking time.sleep() calls; all httpx requests timeout-guarded
+Changes from v2:
+- Mortality scoring is now fully deterministic (no LLM number generation)
+- Mortality computed from user input only — Verity advice excluded
+- TTS timeout decoupled from playback gate timer
+- Servitor prompt no longer asks for MORTALITY_ESTIMATE (we supply it)
+- playback gate timeout extended, TTS timeout failures non-blocking
 """
 
 import asyncio
@@ -22,7 +21,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
 
-app = FastAPI(title="Project Ash - Verity & Servitor (Hardened)")
+# Mortality engine — deterministic, grounded in real data
+from mortality import compute_mortality, MortalityResult
+
+app = FastAPI(title="Project Ash - Verity & Servitor (v3)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,9 +44,8 @@ TTS_URL         = "http://127.0.0.1:8000/tts"
 VERITY_MODEL    = "mistralai/mistral-7b-instruct-v0.3"
 SERVITOR_MODEL  = "qwen2.5-0.5b-instruct"
 
-# httpx timeouts (seconds) — guards against LM Studio hangs
 VERITY_TIMEOUT   = 120
-SERVITOR_TIMEOUT = 10   # Small model; if it doesn't respond in 10s, something is wrong
+SERVITOR_TIMEOUT = 20   # Raised from 10 — Qwen after Verity may need headroom
 TTS_TIMEOUT      = 120
 
 # =============================================================================
@@ -73,44 +74,9 @@ HEDGE_PHRASES = [
 ]
 
 # =============================================================================
-# RISK BANDING
-# =============================================================================
-
-RISK_BANDS = {
-    "armed_conflict":   (35, 85),
-    "civil_unrest":     (20, 60),
-    "infrastructure":   (5,  40),
-    "navigation":       (2,  25),
-    "medical":          (10, 70),
-    "environmental":    (5,  45),
-    "general_survival": (10, 60),
-    "benign":           (0,   5),
-}
-
-def detect_risk_category(text: str) -> str:
-    t = text.lower()
-    if any(w in t for w in ["combat", "weapon", "hostile", "armed", "firefight", "engagement"]):
-        return "armed_conflict"
-    if any(w in t for w in ["riot", "protest", "unrest", "looting", "civil"]):
-        return "civil_unrest"
-    if any(w in t for w in ["wound", "bleeding", "injury", "medical", "trauma", "dosage"]):
-        return "medical"
-    if any(w in t for w in ["route", "path", "highway", "road", "travel", "navigate"]):
-        return "navigation"
-    if any(w in t for w in ["flood", "fire", "storm", "earthquake", "weather"]):
-        return "environmental"
-    if any(w in t for w in ["survival", "shelter", "water", "food", "ration"]):
-        return "general_survival"
-    if any(w in t for w in ["power", "generator", "wiring", "voltage", "grid"]):
-        return "infrastructure"
-    return "benign"
-
-def clamp_mortality(raw: float, category: str) -> float:
-    lo, hi = RISK_BANDS.get(category, (0, 100))
-    return max(lo, min(hi, raw))
-
-# =============================================================================
 # SERVITOR SYSTEM PROMPT
+# NOTE: MORTALITY_ESTIMATE removed — we compute it deterministically.
+# Servitor focuses on deficiency detection and amendment only.
 # =============================================================================
 
 SERVITOR_SYSTEM_PROMPT = """++SERVITOR UNIT ACTIVE++
@@ -140,7 +106,6 @@ For responses requiring amendment:
 ```
 STATUS: REVIEW
 CONFIDENCE: [0-100]%
-MORTALITY_ESTIMATE: [0-100]%
 DEFICIENCY: [One sentence identifying the gap]
 AMENDMENT: [Corrected information or alternate recommendation]
 ```
@@ -149,7 +114,6 @@ For responses with critical omissions:
 ```
 STATUS: CRITICAL
 CONFIDENCE: [0-100]%
-MORTALITY_ESTIMATE: [0-100]%
 DEFICIENCY: [One sentence identifying the critical gap]
 AMENDMENT: [Corrected information]
 RECOMMENDED_ACTION: [Specific action to mitigate risk]
@@ -159,7 +123,7 @@ RECOMMENDED_ACTION: [Specific action to mitigate risk]
 ++THE MACHINE GOD WATCHES++"""
 
 # =============================================================================
-# CORE INFERENCE FUNCTIONS
+# CORE INFERENCE
 # =============================================================================
 
 def should_trigger_servitor(user_input: str, verity_response: str) -> bool:
@@ -172,15 +136,12 @@ def should_trigger_servitor(user_input: str, verity_response: str) -> bool:
 
 
 async def call_verity(user_input: str, system_prompt: str = None) -> str:
-    """
-    Call Verity via LM Studio.
-    Raises httpx.TimeoutException or httpx.HTTPStatusError on failure.
-    """
     if system_prompt is None:
         system_prompt = (
             "You are Verity, a knowledgeable and direct AI assistant. "
             "You provide clear, actionable information. You are warm but precise. "
-            "When discussing technical, survival, or tactical topics, be thorough about risks and requirements."
+            "When discussing technical, survival, or tactical topics, be thorough "
+            "about risks and requirements."
         )
 
     combined_prompt = f"{system_prompt}\n\nUser: {user_input}"
@@ -196,17 +157,12 @@ async def call_verity(user_input: str, system_prompt: str = None) -> str:
             response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"].strip()
     except httpx.TimeoutException as e:
-        raise RuntimeError(f"Verity inference timed out after {VERITY_TIMEOUT}s: {e}") from e
+        raise RuntimeError(f"Verity timed out after {VERITY_TIMEOUT}s") from e
     except httpx.HTTPStatusError as e:
-        raise RuntimeError(f"Verity HTTP error {e.response.status_code}: {e.response.text}") from e
+        raise RuntimeError(f"Verity HTTP {e.response.status_code}") from e
 
 
 async def call_servitor(user_input: str, verity_response: str) -> dict:
-    """
-    Call Servitor via LM Studio — only runs AFTER Verity stream is fully closed.
-    Hard 10-second timeout prevents VRAM contention from stalling the pipeline.
-    Raises RuntimeError on timeout or HTTP failure.
-    """
     combined_prompt = (
         f"{SERVITOR_SYSTEM_PROMPT}\n\n"
         f"++INCOMING TRANSMISSION++\n\n"
@@ -226,23 +182,21 @@ async def call_servitor(user_input: str, verity_response: str) -> dict:
             response.raise_for_status()
             raw = response.json()["choices"][0]["message"]["content"].strip()
     except httpx.TimeoutException as e:
-        raise RuntimeError(f"Servitor inference timed out after {SERVITOR_TIMEOUT}s: {e}") from e
+        raise RuntimeError(f"Servitor timed out after {SERVITOR_TIMEOUT}s") from e
     except httpx.HTTPStatusError as e:
-        raise RuntimeError(f"Servitor HTTP error {e.response.status_code}: {e.response.text}") from e
+        raise RuntimeError(f"Servitor HTTP {e.response.status_code}") from e
 
-    return parse_servitor_output(raw, user_input + " " + verity_response)
+    return parse_servitor_output(raw)
 
 
-def parse_servitor_output(raw: str, context: str) -> dict:
+def parse_servitor_output(raw: str) -> dict:
     result = {
         "raw": raw,
         "status": "UNKNOWN",
         "confidence": None,
-        "mortality_estimate": None,
         "deficiency": None,
         "amendment": None,
         "recommended_action": None,
-        "risk_category": None,
     }
 
     if "STATUS: OPTIMAL" in raw:
@@ -255,13 +209,6 @@ def parse_servitor_output(raw: str, context: str) -> dict:
     m = re.search(r"CONFIDENCE:\s*(\d+)%", raw)
     if m:
         result["confidence"] = int(m.group(1))
-
-    m = re.search(r"MORTALITY_ESTIMATE:\s*(\d+)%", raw)
-    if m:
-        raw_mort = int(m.group(1))
-        cat = detect_risk_category(context)
-        result["mortality_estimate"] = clamp_mortality(raw_mort, cat)
-        result["risk_category"] = cat
 
     m = re.search(r"DEFICIENCY:\s*(.+?)(?=\nAMENDMENT|\nRECOMMENDED_ACTION|```|$)", raw, re.DOTALL)
     if m:
@@ -279,69 +226,66 @@ def parse_servitor_output(raw: str, context: str) -> dict:
 
 
 async def send_to_tts(text: str, voice: str = "verity") -> bytes:
-    """
-    Send text to TTS server. Returns WAV bytes.
-    Raises RuntimeError on timeout or HTTP failure.
-    """
     try:
         async with httpx.AsyncClient(timeout=TTS_TIMEOUT) as client:
             response = await client.post(TTS_URL, json={"text": text, "voice": voice})
             response.raise_for_status()
             return response.content
     except httpx.TimeoutException as e:
-        raise RuntimeError(f"TTS timed out after {TTS_TIMEOUT}s: {e}") from e
+        raise RuntimeError(f"TTS timed out after {TTS_TIMEOUT}s") from e
     except httpx.HTTPStatusError as e:
-        raise RuntimeError(f"TTS HTTP error {e.response.status_code}: {e.response.text}") from e
+        raise RuntimeError(f"TTS HTTP {e.response.status_code}") from e
 
 
-def format_servitor_speech(result: dict) -> str:
+def format_servitor_speech(servitor: dict, mortality: MortalityResult) -> str:
+    """
+    Build Servitor speech from parsed output + deterministic mortality score.
+    Mortality number comes from our engine, not the LLM.
+    """
     parts = []
 
-    # Cold interrupt prefix — severity-gated, machine-formal
-    if result["status"] == "CRITICAL":
+    if servitor["status"] == "CRITICAL":
         parts.append(
             "Prime Directive override. Interrupt authorized. "
             "Critical deficiency detected. Verity unit response flagged for immediate correction."
         )
-    elif result["status"] == "REVIEW":
+    elif servitor["status"] == "REVIEW":
         parts.append(
-            "Attention. Supplemental analysis required. "
-            "Servitor unit transmitting."
+            "Attention. Supplemental analysis required. Servitor unit transmitting."
         )
 
-    if result["deficiency"]:
-        parts.append(f"Deficiency identified. {result['deficiency']}")
+    if servitor["deficiency"]:
+        parts.append(f"Deficiency identified. {servitor['deficiency']}")
 
-    if result["amendment"]:
-        parts.append(f"Correction follows. {result['amendment']}")
+    if servitor["amendment"]:
+        parts.append(f"Correction follows. {servitor['amendment']}")
 
-    if result["mortality_estimate"] is not None:
-        mort = int(result["mortality_estimate"])
-        if mort >= 50:
-            parts.append(
-                f"Mortality estimate: {mort} percent. "
-                "Operator survival probability is low. Immediate action required."
-            )
-        elif mort >= 20:
-            parts.append(f"Mortality estimate: {mort} percent. Risk level elevated.")
-        else:
-            parts.append(f"Mortality estimate: {mort} percent.")
+    # Mortality from our deterministic engine
+    mort = int(mortality.score)
+    if mort >= 50:
+        parts.append(
+            f"Mortality estimate: {mort} percent. {mortality.risk_label}. "
+            "Operator survival probability is low. Immediate action required."
+        )
+    elif mort >= 20:
+        parts.append(
+            f"Mortality estimate: {mort} percent. Risk level {mortality.risk_label.lower()}."
+        )
+    elif mort >= 5:
+        parts.append(f"Mortality estimate: {mort} percent. Risk level {mortality.risk_label.lower()}.")
 
-    if result["recommended_action"]:
-        parts.append(f"Recommended action. {result['recommended_action']}")
+    if servitor["recommended_action"]:
+        parts.append(f"Recommended action. {servitor['recommended_action']}")
 
     parts.append("Servitor unit standing by.")
-
     return " ".join(parts)
 
 
 # =============================================================================
-# WEBSOCKET ENDPOINT
+# WEBSOCKET — per-connection state
 # =============================================================================
 
-# Per-connection active task handle. Only one pending cycle allowed at a time.
-# Keyed by websocket object to support multiple simultaneous clients if needed.
-_active_tasks: dict[int, asyncio.Task] = {}
+_active_tasks:    dict[int, asyncio.Task]  = {}
 _playback_events: dict[int, asyncio.Event] = {}
 
 
@@ -353,71 +297,78 @@ async def _process_cycle(
     playback_event: asyncio.Event,
 ) -> None:
     """
-    Full request/response cycle for one user message.
-    Designed to be run as a cancellable asyncio.Task.
-
     Execution order (sequential — required for single 8GB VRAM):
-      1. call_verity()            — Verity inference (VRAM slot)
-      2. send verity_text frame
-      3. send_to_tts(verity)      — Verity TTS (CPU/RAM)
-      4. send verity_audio frame
-      5. WAIT for playback_complete from frontend   ← state-locked handshake
-      6. call_servitor()          — Servitor inference (VRAM slot, now free)
-      7. send_to_tts(servitor)    — Servitor TTS
-      8. send servitor_result frame
-
-    Every outbound frame carries the request_id so the frontend can discard
-    frames belonging to a cancelled (stale) cycle.
+      1. call_verity()
+      2. compute_mortality()          ← deterministic, instant
+      3. send verity_text + mortality frame
+      4. send_to_tts(verity)
+      5. send verity_audio frame
+      6. WAIT for playback_complete   ← state-locked handshake
+      7. call_servitor()
+      8. send_to_tts(servitor speech)
+      9. send servitor_result frame
     """
 
     # ------------------------------------------------------------------
-    # STEP 1: Verity inference (sequential — VRAM is fully dedicated here)
+    # STEP 1: Verity inference
     # ------------------------------------------------------------------
     try:
         verity_response = await call_verity(user_input)
     except asyncio.CancelledError:
-        return  # Silently exit — a new cycle has taken over
+        return
     except Exception as e:
         await websocket.send_json({
-            "type": "error",
-            "source": "verity",
-            "request_id": request_id,
-            "message": str(e),
+            "type": "error", "source": "verity",
+            "request_id": request_id, "message": str(e),
         })
         return
 
     # ------------------------------------------------------------------
-    # STEP 2: Send Verity text to frontend
+    # STEP 2: Deterministic mortality scoring (instant, no VRAM)
+    # ------------------------------------------------------------------
+    mortality = compute_mortality(user_input, verity_response)
+
+    # ------------------------------------------------------------------
+    # STEP 3: Send Verity text + mortality to frontend
     # ------------------------------------------------------------------
     try:
         await websocket.send_json({
             "type": "verity_text",
             "content": verity_response,
+            "mortality": {
+                "score":         mortality.score,
+                "risk_label":    mortality.risk_label,
+                "category":      mortality.category,
+                "sub_category":  mortality.sub_category,
+                "confidence":    mortality.confidence,
+                "events": [
+                    {"label": e.label, "delta": e.delta}
+                    for e in mortality.events
+                ],
+            },
             "request_id": request_id,
-            "timestamp": timestamp,
+            "timestamp":  timestamp,
         })
     except asyncio.CancelledError:
         return
 
     # ------------------------------------------------------------------
-    # STEP 3: Verity TTS (CPU-bound, VRAM is free)
+    # STEP 4: Verity TTS
     # ------------------------------------------------------------------
+    verity_audio = None
     try:
         verity_audio = await send_to_tts(verity_response, voice="verity")
     except asyncio.CancelledError:
         return
     except Exception as e:
+        # TTS failure is non-blocking — log and continue to Servitor
         await websocket.send_json({
-            "type": "error",
-            "source": "tts_verity",
-            "request_id": request_id,
-            "message": str(e),
+            "type": "error", "source": "tts_verity",
+            "request_id": request_id, "message": str(e),
         })
-        # Don't return — we can still attempt Servitor without TTS
-        verity_audio = None
 
     # ------------------------------------------------------------------
-    # STEP 4: Send Verity audio
+    # STEP 5: Send Verity audio
     # ------------------------------------------------------------------
     if verity_audio is not None:
         try:
@@ -426,44 +377,40 @@ async def _process_cycle(
                 "audio_data": base64.b64encode(verity_audio).decode("utf-8"),
                 "format": "wav",
                 "request_id": request_id,
-                "timestamp": timestamp,
+                "timestamp":  timestamp,
             })
         except asyncio.CancelledError:
             return
 
     # ------------------------------------------------------------------
-    # STEP 5: State-locked handshake — HOLD until frontend says it's done
-    # We wait for a {"type": "playback_complete", "request_id": <id>}
-    # from the frontend before firing Servitor.
+    # STEP 6: Playback gate — only if Servitor is needed
+    # TTS timeout fix: gate timer starts AFTER audio is sent, not before.
+    # Frontend must send playback_complete when audio finishes playing.
+    # Timeout is generous (90s) to cover long Verity responses.
     # ------------------------------------------------------------------
     servitor_triggered = should_trigger_servitor(user_input, verity_response)
 
     if servitor_triggered:
-        # Notify frontend that Servitor is queued, awaiting playback gate
         try:
             await websocket.send_json({
                 "type": "servitor_pending",
                 "request_id": request_id,
-                "timestamp": timestamp,
+                "timestamp":  timestamp,
             })
         except asyncio.CancelledError:
             return
 
-        # Wait for the playback_complete gate using an asyncio.Event.
-        # The outer websocket_chat loop sets this event when it receives
-        # a playback_complete frame — avoiding the two-reader race condition
-        # where both the outer loop and this spin-wait competed for the same
-        # WebSocket message.
+        # Wait for frontend playback_complete signal
+        # Timer starts NOW — after audio was sent — not during TTS generation
         try:
-            await asyncio.wait_for(playback_event.wait(), timeout=60.0)
+            await asyncio.wait_for(playback_event.wait(), timeout=90.0)
         except asyncio.TimeoutError:
-            # Frontend never sent playback_complete — proceed anyway
-            pass
+            pass  # Proceed anyway — audio may have finished without confirmation
         except asyncio.CancelledError:
             return
 
         # ------------------------------------------------------------------
-        # STEP 6: Servitor inference — VRAM is now free (Verity fully done)
+        # STEP 7: Servitor inference
         # ------------------------------------------------------------------
         try:
             servitor_result = await call_servitor(user_input, verity_response)
@@ -471,60 +418,76 @@ async def _process_cycle(
             return
         except Exception as e:
             await websocket.send_json({
-                "type": "error",
-                "source": "servitor",
-                "request_id": request_id,
-                "message": str(e),
+                "type": "error", "source": "servitor",
+                "request_id": request_id, "message": str(e),
             })
             return
 
         # ------------------------------------------------------------------
-        # STEP 7 + 8: Servitor TTS + send result
+        # STEP 8 + 9: Servitor TTS + send result
         # ------------------------------------------------------------------
         if servitor_result["status"] == "OPTIMAL":
             try:
                 await websocket.send_json({
                     "type": "servitor_optimal",
                     "confidence": servitor_result["confidence"],
+                    "mortality": {
+                        "score":      mortality.score,
+                        "risk_label": mortality.risk_label,
+                        "category":   mortality.category,
+                        "confidence": mortality.confidence,
+                    },
                     "request_id": request_id,
-                    "timestamp": timestamp,
+                    "timestamp":  timestamp,
                 })
             except asyncio.CancelledError:
                 return
         else:
-            servitor_speech = format_servitor_speech(servitor_result)
+            servitor_speech = format_servitor_speech(servitor_result, mortality)
 
+            servitor_audio = None
             try:
                 servitor_audio = await send_to_tts(servitor_speech, voice="servitor")
             except asyncio.CancelledError:
                 return
             except Exception as e:
                 await websocket.send_json({
-                    "type": "error",
-                    "source": "tts_servitor",
-                    "request_id": request_id,
-                    "message": str(e),
+                    "type": "error", "source": "tts_servitor",
+                    "request_id": request_id, "message": str(e),
                 })
-                return
 
             try:
                 await websocket.send_json({
                     "type": "servitor_result",
-                    "status": servitor_result["status"],
-                    "confidence": servitor_result["confidence"],
-                    "mortality_estimate": servitor_result["mortality_estimate"],
-                    "risk_category": servitor_result.get("risk_category"),
-                    "deficiency": servitor_result["deficiency"],
-                    "amendment": servitor_result["amendment"],
+                    "status":             servitor_result["status"],
+                    "confidence":         servitor_result["confidence"],
+                    "deficiency":         servitor_result["deficiency"],
+                    "amendment":          servitor_result["amendment"],
                     "recommended_action": servitor_result["recommended_action"],
-                    "audio_data": base64.b64encode(servitor_audio).decode("utf-8"),
+                    "mortality": {
+                        "score":         mortality.score,
+                        "risk_label":    mortality.risk_label,
+                        "category":      mortality.category,
+                        "sub_category":  mortality.sub_category,
+                        "confidence":    mortality.confidence,
+                        "events": [
+                            {"label": e.label, "delta": e.delta}
+                            for e in mortality.events
+                        ],
+                    },
+                    "audio_data":   base64.b64encode(servitor_audio).decode("utf-8")
+                                    if servitor_audio else None,
                     "audio_format": "wav",
-                    "request_id": request_id,
-                    "timestamp": timestamp,
+                    "request_id":   request_id,
+                    "timestamp":    timestamp,
                 })
             except asyncio.CancelledError:
                 return
 
+
+# =============================================================================
+# WEBSOCKET ENDPOINT
+# =============================================================================
 
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
@@ -533,51 +496,36 @@ async def websocket_chat(websocket: WebSocket):
 
     try:
         while True:
-            # ----------------------------------------------------------------
-            # Receive next user message
-            # ----------------------------------------------------------------
             data = await websocket.receive_json()
             user_input = data.get("message", "").strip()
 
-            # playback_complete sets the event that unblocks the active cycle's
-            # Servitor gate — avoids the two-reader race on the WebSocket.
             if data.get("type") == "playback_complete":
-                active_event = _playback_events.get(conn_id)
-                if active_event:
-                    active_event.set()
+                event = _playback_events.get(conn_id)
+                if event:
+                    event.set()
                 continue
 
             if not user_input:
                 continue
 
-            # ----------------------------------------------------------------
-            # TASK MANAGEMENT: Cancel any in-flight cycle immediately
-            # ----------------------------------------------------------------
+            # Cancel any in-flight cycle
             existing = _active_tasks.get(conn_id)
             if existing and not existing.done():
                 existing.cancel()
                 try:
-                    await existing  # Drain CancelledError cleanly
+                    await existing
                 except (asyncio.CancelledError, Exception):
                     pass
 
-            # ----------------------------------------------------------------
-            # Stamp this cycle with a unique ID so the frontend can reject
-            # any audio frames that arrive from the cancelled task
-            # ----------------------------------------------------------------
             request_id = str(uuid.uuid4())
             timestamp  = datetime.now().isoformat()
 
-            # Acknowledge receipt immediately so frontend can clear its UI
             await websocket.send_json({
                 "type": "request_accepted",
                 "request_id": request_id,
-                "timestamp": timestamp,
+                "timestamp":  timestamp,
             })
 
-            # ----------------------------------------------------------------
-            # Launch the new cycle as a cancellable task
-            # ----------------------------------------------------------------
             playback_event = asyncio.Event()
             _playback_events[conn_id] = playback_event
             task = asyncio.create_task(
@@ -586,18 +534,16 @@ async def websocket_chat(websocket: WebSocket):
             _active_tasks[conn_id] = task
 
     except WebSocketDisconnect:
-        existing = _active_tasks.pop(conn_id, None)
-        if existing and not existing.done():
-            existing.cancel()
+        t = _active_tasks.pop(conn_id, None)
+        if t and not t.done(): t.cancel()
         _playback_events.pop(conn_id, None)
         print(f"Client {conn_id} disconnected.")
 
     except Exception as e:
-        existing = _active_tasks.pop(conn_id, None)
-        if existing and not existing.done():
-            existing.cancel()
+        t = _active_tasks.pop(conn_id, None)
+        if t and not t.done(): t.cancel()
         _playback_events.pop(conn_id, None)
-        print(f"WebSocket error for {conn_id}: {e}")
+        print(f"WebSocket error {conn_id}: {e}")
 
 
 # =============================================================================
@@ -610,7 +556,6 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 async def chat_rest(request: ChatRequest):
-    """REST endpoint — sequential, no streaming."""
     request_id = str(uuid.uuid4())
 
     try:
@@ -618,9 +563,18 @@ async def chat_rest(request: ChatRequest):
     except Exception as e:
         return {"error": str(e), "request_id": request_id}
 
+    mortality = compute_mortality(request.message, verity_response)
+
     result = {
-        "request_id": request_id,
+        "request_id":      request_id,
         "verity_response": verity_response,
+        "mortality": {
+            "score":        mortality.score,
+            "risk_label":   mortality.risk_label,
+            "category":     mortality.category,
+            "sub_category": mortality.sub_category,
+            "confidence":   mortality.confidence,
+        },
         "servitor": None,
     }
 
@@ -637,12 +591,8 @@ async def chat_rest(request: ChatRequest):
 
 @app.get("/health")
 async def health():
-    return {"status": "operational", "unit": "ash-core-v2"}
+    return {"status": "operational", "unit": "ash-core-v3"}
 
-
-# =============================================================================
-# STARTUP
-# =============================================================================
 
 if __name__ == "__main__":
     import uvicorn
