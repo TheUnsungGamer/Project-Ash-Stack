@@ -5,6 +5,7 @@ A browser-based tactical UI for chatting with a local AI, with an offline vector
 <img width="1920" height="1034" alt="gifProjectAsh" src="https://github.com/user-attachments/assets/7cce977e-a1c6-445f-8dae-2d8be1af6959" />
 
 > Ash booting from the desktop, connecting to LM Studio, and sending a message through the Cogitator interface.
+> The Cogitator analysis panel activates on messages that warrant observation. Routine inputs are passed through without evaluation.
 
 ---
 
