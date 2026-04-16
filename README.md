@@ -1,8 +1,8 @@
 # Ash — Local AI Terminal Interface
 
-<<<<<<< HEAD
-
 A browser-based tactical UI for chatting with a local AI, with an offline vector map, voice synthesis, and a Warhammer 40K aesthetic.
+
+<img width="1920" height="1034" alt="gifProjectAsh" src="https://github.com/user-attachments/assets/7cce977e-a1c6-445f-8dae-2d8be1af6959" />
 
 ---
 
@@ -45,7 +45,7 @@ Installed via `pip install -r tech-priest-tts/requirements.txt`:
 
 ### External Tools (map tiles)
 
-Located in `C:\Users\richa\Desktop\planetpiler\`:
+Located in your local planetiler directory:
 
 # | File | Purpose |
 
@@ -57,21 +57,17 @@ Dark green-on-black terminal aesthetic. Streaming responses. Voice output via a 
 ## Stack
 
 | Layer | Tech |
-
-> > > > > > > aac2bfa12d27133175b12873899c8fb709ce4a68
-> > > > > > > |---|---|
-> > > > > > > | `planetiler.jar` | Generates `.pmtiles` from OSM data (JDK 21 required) |
-> > > > > > > | `pmtiles.exe` | Inspect/verify `.pmtiles` files |
-> > > > > > > | `us.pmtiles` | Pre-generated US vector tile archive (~10GB) |
-> > > > > > > | `us-260406.osm.pbf` | OpenStreetMap source data for US |
-> > > > > > > | `map.html` | MapLibre GL map page served to the iframe |
+| `pmtiles.exe` | Inspect/verify `.pmtiles` files |
+| `us.pmtiles` | Pre-generated US vector tile archive (~10GB) |
+| `us-260406.osm.pbf` | OpenStreetMap source data for US |
+| `map.html` | MapLibre GL map page served to the iframe |
 
 > **Note:** `us.pmtiles` was generated with planetiler 0.10.2 from OSM data as of 2026-04-06.
 > Regenerating takes significant time and disk space.
 
 ---
 
-<<<<<<< HEAD
+
 
 ## Ports
 
@@ -82,7 +78,7 @@ Dark green-on-black terminal aesthetic. Streaming responses. Voice output via a 
 | 8080 | Tile server  | Serves `map.html` + `us.pmtiles` |
 | 5173 | Ash frontend | Vite dev server                  |
 
-=======
+
 
 ## Project Structure
 
@@ -103,31 +99,31 @@ ash/
 └── .env.example          # Template for any env vars
 ```
 
-> > > > > > > aac2bfa12d27133175b12873899c8fb709ce4a68
+
 
 ---
 
 ## Setup
 
-<<<<<<< HEAD
+
 
 ### 1. Install frontend dependencies
 
-=======
+
 
 ### 1. Frontend
 
-> > > > > > > aac2bfa12d27133175b12873899c8fb709ce4a68
+
 
 ```bash
 npm install
 ```
 
-<<<<<<< HEAD
+
 
 ### 2. Set up TTS server
 
-=======
+
 
 ### 2. LM Studio
 
@@ -136,7 +132,7 @@ npm install
 
 ### 3. TTS Backend (optional)
 
-> > > > > > > aac2bfa12d27133175b12873899c8fb709ce4a68
+
 
 ```bash
 cd tech-priest-tts
@@ -175,7 +171,7 @@ If you are not using RVC, set `tts_mode` to `browser` in `settings.json` to use 
 
 Edit `settings.json`:
 
-=======
+
 
 ## Configuration
 
@@ -232,7 +228,7 @@ Open `http://localhost:5173`.
 To regenerate tiles from fresh OSM data (requires JDK 21):
 
 ```bash
-cd C:\Users\richa\Desktop\planetpiler
+cd /path/to/your/planetiler/directory
 java -jar planetiler.jar --download --area=us --output=us.pmtiles
 ```
 
@@ -240,7 +236,7 @@ java -jar planetiler.jar --download --area=us --output=us.pmtiles
 
 ## Voice Modes
 
-<<<<<<< HEAD
+
 
 | Mode      | Description                             | Requirements                    |
 | --------- | --------------------------------------- | ------------------------------- |
@@ -278,7 +274,6 @@ Project-Ash-Stack/
 └── README.md
 ```
 
-=======
 | Mode | Description |
 |---|---|
 | `browser` | Uses Web Speech API (no extra setup) |
@@ -311,4 +306,4 @@ java -jar planetiler.jar --download --area=monaco
 - `.venv/` is gitignored — run the setup steps above after cloning
 - Audio output files are gitignored (`*.wav`, `*.mp3`)
 - See `settings.json` for runtime tunables
-  > > > > > > > aac2bfa12d27133175b12873899c8fb709ce4a68
+
