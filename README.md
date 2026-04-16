@@ -148,7 +148,7 @@ tech-priest-tts/models/en_GB-jenny_dioco-medium.onnx
 tech-priest-tts/models/en_GB-jenny_dioco-medium.onnx.json
 ```
 
-<<<<<<< HEAD
+
 
 ### 3. Set up RVC bridge (optional voice cloning)
 
@@ -177,7 +177,7 @@ Edit `settings.json`:
 
 Edit `settings.json` to point at your LM Studio instance and set voice preferences:
 
-> > > > > > > aac2bfa12d27133175b12873899c8fb709ce4a68
+
 
 ```json
 {
