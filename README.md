@@ -9,6 +9,48 @@ A browser-based tactical UI for chatting with a local AI, with an offline vector
 
 ---
 
+## What Ash is
+
+Ash is a fully offline AI assistant built for scenarios where the internet isn't coming back. It runs on a single workstation with no cloud dependencies, no API keys, and no outbound connections during operation. Everything — the language models, the speech synthesis, the map data — lives on the local machine.
+
+The intended use case is long-term grid-down: a tool that still works when everything else has gone quiet. In that scenario it functions as a knowledge fallback — first aid, repair, navigation, the things you'd normally pull up on a phone. The interface is designed to feel grounded and deliberate rather than cheerful. Most AI assistants are built for convenience. Ash is built for the opposite.
+
+---
+
+## How it's put together
+
+Ash runs two language models side by side.
+
+**Verity** is the primary assistant — Mistral 7B, styled as a Warhammer 40K Tactical Cogitator. Verity answers the user's questions directly. Responses are capped at 100 words. The cap is a hardware decision as much as a design one: Ash runs on an 8GB RTX 2080 with 32GB of system RAM, and every token Verity generates has to make it through the TTS pipeline and voice cloning stage before reaching the user. Short responses keep the feedback loop fast enough to feel like a conversation rather than a broadcast.
+
+**Servitor** is a second, smaller model (Qwen 2.5 0.5B) that audits Verity's answers. When a response touches survival, tactical, medical, or infrastructure topics, Servitor runs a parallel analysis and returns a structured risk assessment — status, risk level, failure probability, and any specific deficiencies in Verity's answer. The audit surfaces as a separate panel with its own voice. The point is to make the risk visible: in a real crisis, confidently wrong advice is more dangerous than no advice, and the Servitor's job is to say so out loud.
+
+The two models run on different hardware paths. Verity uses partial GPU offload (about half the layers), which leaves enough VRAM for RVC voice conversion to run on the same card. Servitor runs entirely on CPU. A runtime toggle lets the operator drop to CPU-only for both models if GPU contention with RVC becomes a problem.
+
+---
+
+## Why RVC
+
+Voice cloning isn't a feature most assistants need. Ash uses it so the operator can configure the assistant's voice to something familiar rather than being locked to a generic TTS output. In a long crisis, cognitive load matters, and a familiar voice lowers it.
+
+RVC (Retrieval-based Voice Conversion) was chosen because it runs locally, produces high-quality conversions from short reference samples, and doesn't require retraining to switch voices — the voice model file can be swapped at runtime.
+
+---
+
+## The voice pipeline
+
+The voice stack was the most technically difficult part of the project. The path is:
+
+```
+Text → Piper TTS → RVC voice conversion → Post-processing FX → Audio out
+```
+
+RVC is a large research codebase that wasn't designed to be embedded in other applications. It ships with its own Python runtime that intercepts subprocess calls, and its entry points launch a full Gradio web UI by default. Attempting to import or subprocess it into a FastAPI server results in a process that either can't find its own dependencies or spawns an unrelated web interface.
+
+The solution is a file-bridge: the TTS server writes a WAV file to a watched directory, a standalone RVC watcher process picks it up, runs inference, and writes the result back. The bridge keeps RVC isolated in its own process with its own environment, so it can't crash the TTS server, can't leak its Gradio state, and can be swapped for a different voice model without touching any other code. The filename prefix (`verity_` vs `servitor_`) tells the watcher which voice model to load.
+
+---
+
 ## Architecture Overview
 
 ```
@@ -228,6 +270,20 @@ java -jar planetiler.jar --download --area=monaco
 ```
 
 > `.jar` files are excluded via `.gitignore`.
+
+---
+
+## In progress
+
+Ash works but it isn't finished. A few things are actively being worked on:
+
+**Event-driven RVC bridge.** The current file-bridge polls the output directory every 250ms. Replacing that with a filesystem watcher eliminates the polling latency and removes busywork from the TTS server.
+
+**RVC queue management.** Under rapid consecutive requests, the bridge can process files out of order or trip over itself. A proper queue in front of the watcher keeps inference serialized.
+
+**A larger Servitor.** Qwen 2.5 0.5B audits Verity acceptably for simple cases but misses nuance in medical and tactical domains. Upgrading to a larger audit model, or supplementing with rule-based validation for specific risk categories, is the next cognition improvement.
+
+**Layered responses.** Verity's 100-word cap is the right choice for spoken output but can feel curt when the operator wants depth. The plan is to keep the 100-word spoken answer and surface a longer written version in the chat log — fast audio, full detail in text.
 
 ---
 
