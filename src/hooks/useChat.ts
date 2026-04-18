@@ -2,11 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { ChatMessage } from "../types/chat";
 
-// =============================================================================
-// TYPES
-// =============================================================================
-
-interface ServitorResult {
+export interface ServitorAuditResult {
   status: "OPTIMAL" | "REVIEW" | "CRITICAL";
   confidence: number | null;
   mortality_estimate: number | null;
@@ -21,10 +17,9 @@ interface ServitorResult {
 interface UseChatOptions {
   initialMessages?: ChatMessage[];
   onAssistantMessageComplete?: (message: ChatMessage) => void | Promise<void>;
-  onServitorResult?: (result: ServitorResult) => void;
-  // Now receives requestId so App.tsx queue can send playback_complete at the right time
-  onVerityAudio?: (audioData: string, requestId: string) => void;
-  onServitorAudio?: (audioData: string, requestId: string) => void;
+  onServitorAuditResult?: (result: ServitorAuditResult) => void;
+  onVerityAudioReady?: (audioBase64: string, requestId: string) => void;
+  onServitorAudioReady?: (audioBase64: string, requestId: string) => void;
 }
 
 interface UseChatResult {
@@ -34,29 +29,45 @@ interface UseChatResult {
   isStreaming: boolean;
   errorMessage: string | null;
   isConnected: boolean;
-  servitorPending: boolean;
-  servitorResult: ServitorResult | null;
+  servitorAuditPending: boolean;
+  servitorAuditResult: ServitorAuditResult | null;
   currentRequestId: string | null;
   setSelectedModel: (model: string) => void;
   sendMessage: (text: string) => Promise<void>;
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>;
-  dismissServitor: () => void;
-  // Exposed so App.tsx audio queue can fire the handshake signal
-  sendPlaybackComplete: (requestId: string) => void;
+  dismissServitorPanel: () => void;
+  sendVerityPlaybackComplete: (requestId: string) => void;
 }
 
-// =============================================================================
-// WEBSOCKET CONFIG
-// =============================================================================
+type IncomingWebSocketFrame = {
+  type: string;
+  request_id?: string;
+  content?: string;
+  audio_data?: string;
+  audio_format?: string;
+  status?: "OPTIMAL" | "REVIEW" | "CRITICAL";
+  confidence?: number;
+  mortality_estimate?: number;
+  risk_category?: string;
+  deficiency?: string;
+  amendment?: string;
+  recommended_action?: string;
+  source?: string;
+  message?: string;
+};
 
-const WEBSOCKET_URL = "ws://127.0.0.1:8080/ws/chat";
-const RECONNECT_DELAY = 3000;
+const ASH_WEBSOCKET_URL = "ws://127.0.0.1:8080/ws/chat";
+const WEBSOCKET_RECONNECT_DELAY_MS = 3_000;
 
-// =============================================================================
-// HELPER
-// =============================================================================
+// These frame types either set the active request ID or must always surface to the user.
+const FRAME_TYPES_EXEMPT_FROM_STALE_CYCLE_GUARD = new Set([
+  "request_accepted",
+  "verity_text",
+  "verity_audio",
+  "error",
+]);
 
-function createMessage(role: ChatMessage["role"], content: string): ChatMessage {
+function buildChatMessage(role: ChatMessage["role"], content: string): ChatMessage {
   return {
     id: crypto.randomUUID(),
     role,
@@ -65,258 +76,183 @@ function createMessage(role: ChatMessage["role"], content: string): ChatMessage 
   };
 }
 
-// =============================================================================
-// HOOK
-// =============================================================================
-
 export function useChat({
   initialMessages = [],
   onAssistantMessageComplete,
-  onServitorResult,
-  onVerityAudio,
-  onServitorAudio,
+  onServitorAuditResult,
+  onVerityAudioReady,
+  onServitorAudioReady,
 }: UseChatOptions = {}): UseChatResult {
-  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
-  const [availableModels] = useState<string[]>(["verity-mistral-7b"]);
-  const [selectedModel, setSelectedModel] = useState("verity-mistral-7b");
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [isConnected, setIsConnected] = useState(false);
-  const [servitorPending, setServitorPending] = useState(false);
-  const [servitorResult, setServitorResult] = useState<ServitorResult | null>(null);
+  const [messages, setMessages]                         = useState<ChatMessage[]>(initialMessages);
+  const [availableModels]                               = useState<string[]>(["verity-mistral-7b"]);
+  const [selectedModel, setSelectedModel]               = useState("verity-mistral-7b");
+  const [isStreaming, setIsStreaming]                   = useState(false);
+  const [errorMessage, setErrorMessage]                 = useState<string | null>(null);
+  const [isConnected, setIsConnected]                   = useState(false);
+  const [servitorAuditPending, setServitorAuditPending] = useState(false);
+  const [servitorAuditResult, setServitorAuditResult]   = useState<ServitorAuditResult | null>(null);
+  const [currentRequestId, setCurrentRequestId]         = useState<string | null>(null);
 
-  // Tracks the request_id the backend stamped on the most recently accepted cycle.
-  // Any incoming frame whose request_id doesn't match this is from a stale/cancelled cycle.
-  const [currentRequestId, setCurrentRequestId] = useState<string | null>(null);
-  const currentRequestIdRef = useRef<string | null>(null);
+  // Ref-backed so stale closures in WebSocket handlers always see the latest value.
+  const currentRequestIdRef      = useRef<string | null>(null);
+  const currentAssistantIdRef    = useRef<string | null>(null);
+  const wsRef                    = useRef<WebSocket | null>(null);
+  const reconnectTimerRef        = useRef<number | null>(null);
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<number | null>(null);
-  const currentAssistantIdRef = useRef<string | null>(null);
-
-  // Stable callback refs
+  // Stable callback refs — prevents WebSocket handler from closing over stale callbacks.
   const onAssistantMessageCompleteRef = useRef(onAssistantMessageComplete);
-  const onServitorResultRef = useRef(onServitorResult);
-  const onVerityAudioRef = useRef(onVerityAudio);
-  const onServitorAudioRef = useRef(onServitorAudio);
+  const onServitorAuditResultRef      = useRef(onServitorAuditResult);
+  const onVerityAudioReadyRef         = useRef(onVerityAudioReady);
+  const onServitorAudioReadyRef       = useRef(onServitorAudioReady);
 
   useEffect(() => {
     onAssistantMessageCompleteRef.current = onAssistantMessageComplete;
-    onServitorResultRef.current = onServitorResult;
-    onVerityAudioRef.current = onVerityAudio;
-    onServitorAudioRef.current = onServitorAudio;
-  }, [onAssistantMessageComplete, onServitorResult, onVerityAudio, onServitorAudio]);
+    onServitorAuditResultRef.current      = onServitorAuditResult;
+    onVerityAudioReadyRef.current         = onVerityAudioReady;
+    onServitorAudioReadyRef.current       = onServitorAudioReady;
+  }, [onAssistantMessageComplete, onServitorAuditResult, onVerityAudioReady, onServitorAudioReady]);
 
-  // ---------------------------------------------------------------------------
-  // sendPlaybackComplete — called by App.tsx audio queue after Verity audio ends
-  // ---------------------------------------------------------------------------
-
-  const sendPlaybackComplete = useCallback((requestId: string) => {
+  const sendVerityPlaybackComplete = useCallback((requestId: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      console.warn("[Ash] sendPlaybackComplete: WebSocket not open, signal dropped");
+      console.warn("[Ash] sendVerityPlaybackComplete: WebSocket not open, signal dropped");
       return;
     }
-    // Only send if this requestId still matches the active cycle.
-    // Guards against a delayed onended firing for a stale audio object.
+    // Guard against a delayed onended firing for a previous cycle's audio element.
     if (requestId !== currentRequestIdRef.current) {
-      console.log(
-        `[Ash] sendPlaybackComplete: stale requestId ${requestId} ignored (active: ${currentRequestIdRef.current})`
-      );
+      console.log(`[Ash] Stale playback_complete dropped — id: ${requestId} (active: ${currentRequestIdRef.current})`);
       return;
     }
-    console.log(`[Ash] Sending playback_complete for ${requestId}`);
-    wsRef.current.send(
-      JSON.stringify({ type: "playback_complete", request_id: requestId })
-    );
+    wsRef.current.send(JSON.stringify({ type: "playback_complete", request_id: requestId }));
   }, []);
 
-  // ---------------------------------------------------------------------------
-  // Message Handling
-  // ---------------------------------------------------------------------------
+  const handleIncomingWebSocketFrame = useCallback((frame: IncomingWebSocketFrame) => {
+    const incomingRequestId = frame.request_id ?? null;
 
-  const handleMessage = useCallback(
-    (data: {
-      type: string;
-      request_id?: string;
-      content?: string;
-      audio_data?: string;
-      audio_format?: string;
-      status?: "OPTIMAL" | "REVIEW" | "CRITICAL";
-      confidence?: number;
-      mortality_estimate?: number;
-      risk_category?: string;
-      deficiency?: string;
-      amendment?: string;
-      recommended_action?: string;
-      source?: string;
-      message?: string;
-    }) => {
-      const incomingId = data.request_id ?? null;
+    // Drop frames from cancelled/stale cycles, with exemptions for frames that
+    // race request_accepted or must always surface.
+    if (
+      incomingRequestId !== null &&
+      incomingRequestId !== currentRequestIdRef.current &&
+      !FRAME_TYPES_EXEMPT_FROM_STALE_CYCLE_GUARD.has(frame.type)
+    ) {
+      console.log(`[Ash] Stale frame dropped — type: ${frame.type}, id: ${incomingRequestId}`);
+      return;
+    }
 
-      // Ghost-frame guard: drop frames from cancelled/stale cycles.
-      // Exemptions:
-      //   - request_accepted: sets the new active ID, must always land
-      //   - verity_text/verity_audio: arrive immediately after request_accepted
-      //     and may race it in the same WebSocket flush — always accept them
-      //   - error: always surface regardless of cycle
-      const RACE_EXEMPT = new Set([
-        "request_accepted",
-        "verity_text",
-        "verity_audio",
-        "error",
-      ]);
-      if (
-        incomingId !== null &&
-        incomingId !== currentRequestIdRef.current &&
-        !RACE_EXEMPT.has(data.type)
-      ) {
-        console.log(
-          `[Ash] Ghost frame dropped — type: ${data.type}, id: ${incomingId} (active: ${currentRequestIdRef.current})`
-        );
-        return;
-      }
-
-      switch (data.type) {
-
-        // Backend confirms it received the message and stamps the cycle ID
-        case "request_accepted":
-          if (incomingId) {
-            currentRequestIdRef.current = incomingId;
-            setCurrentRequestId(incomingId);
-            console.log(`[Ash] New cycle accepted: ${incomingId}`);
-          }
-          break;
-
-        case "verity_text":
-          setIsStreaming(false);
-          if (currentAssistantIdRef.current) {
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === currentAssistantIdRef.current
-                  ? { ...msg, content: data.content ?? "" }
-                  : msg
-              )
-            );
-            if (onAssistantMessageCompleteRef.current) {
-              onAssistantMessageCompleteRef.current({
-                id: currentAssistantIdRef.current,
-                role: "assistant",
-                content: data.content ?? "",
-                createdAt: Date.now(),
-              });
-            }
-          }
-          break;
-
-        case "verity_audio":
-          // Pass requestId to the queue so it knows which ID to ack when done
-          if (data.audio_data && onVerityAudioRef.current && incomingId) {
-            onVerityAudioRef.current(data.audio_data, incomingId);
-          }
-          break;
-
-        case "servitor_pending":
-          setServitorPending(true);
-          break;
-
-        case "servitor_result": {
-          setServitorPending(false);
-          const result: ServitorResult = {
-            status: data.status ?? "REVIEW",
-            confidence: data.confidence ?? null,
-            mortality_estimate: data.mortality_estimate ?? null,
-            risk_category: data.risk_category ?? null,
-            deficiency: data.deficiency ?? null,
-            amendment: data.amendment ?? null,
-            recommended_action: data.recommended_action ?? null,
-            audio_data: data.audio_data,
-            audio_format: data.audio_format,
-          };
-          setServitorResult(result);
-          if (onServitorResultRef.current) {
-            onServitorResultRef.current(result);
-          }
-          if (data.audio_data && onServitorAudioRef.current && incomingId) {
-            onServitorAudioRef.current(data.audio_data, incomingId);
-          }
-          break;
+    switch (frame.type) {
+      case "request_accepted":
+        if (incomingRequestId) {
+          currentRequestIdRef.current = incomingRequestId;
+          setCurrentRequestId(incomingRequestId);
         }
+        break;
 
-        case "servitor_optimal":
-          setServitorPending(false);
-          console.log("[Ash] Servitor: OPTIMAL — confidence:", data.confidence);
-          break;
+      case "verity_text":
+        setIsStreaming(false);
+        if (currentAssistantIdRef.current) {
+          const completedMessage: ChatMessage = {
+            id: currentAssistantIdRef.current,
+            role: "assistant",
+            content: frame.content ?? "",
+            createdAt: Date.now(),
+          };
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === currentAssistantIdRef.current
+                ? { ...msg, content: frame.content ?? "" }
+                : msg
+            )
+          );
+          onAssistantMessageCompleteRef.current?.(completedMessage);
+        }
+        break;
 
-        case "error":
-          console.error(`[Ash] Backend error from ${data.source}:`, data.message);
-          setErrorMessage(`${data.source ?? "unknown"}: ${data.message ?? "Unknown error"}`);
-          setIsStreaming(false);
-          setServitorPending(false);
-          break;
+      case "verity_audio":
+        if (frame.audio_data && incomingRequestId) {
+          onVerityAudioReadyRef.current?.(frame.audio_data, incomingRequestId);
+        }
+        break;
 
-        default:
-          console.log("[Ash] Unknown message type:", data.type);
+      case "servitor_pending":
+        setServitorAuditPending(true);
+        break;
+
+      case "servitor_result": {
+        setServitorAuditPending(false);
+        const result: ServitorAuditResult = {
+          status:              frame.status ?? "REVIEW",
+          confidence:          frame.confidence ?? null,
+          mortality_estimate:  frame.mortality_estimate ?? null,
+          risk_category:       frame.risk_category ?? null,
+          deficiency:          frame.deficiency ?? null,
+          amendment:           frame.amendment ?? null,
+          recommended_action:  frame.recommended_action ?? null,
+          audio_data:          frame.audio_data,
+          audio_format:        frame.audio_format,
+        };
+        setServitorAuditResult(result);
+        onServitorAuditResultRef.current?.(result);
+        if (frame.audio_data && incomingRequestId) {
+          onServitorAudioReadyRef.current?.(frame.audio_data, incomingRequestId);
+        }
+        break;
       }
-    },
-    []
-  );
 
-  // ---------------------------------------------------------------------------
-  // WebSocket Connection
-  // ---------------------------------------------------------------------------
+      case "servitor_optimal":
+        setServitorAuditPending(false);
+        break;
+
+      case "error":
+        setErrorMessage(`${frame.source ?? "unknown"}: ${frame.message ?? "Unknown error"}`);
+        setIsStreaming(false);
+        setServitorAuditPending(false);
+        break;
+
+      default:
+        console.log("[Ash] Unknown frame type:", frame.type);
+    }
+  }, []);
 
   useEffect(() => {
     let ws: WebSocket | null = null;
 
-    const connect = () => {
+    const connectToAshBackend = () => {
       if (ws?.readyState === WebSocket.OPEN) return;
 
-      console.log("[Ash] Connecting to WebSocket...");
-      ws = new WebSocket(WEBSOCKET_URL);
+      ws = new WebSocket(ASH_WEBSOCKET_URL);
 
       ws.onopen = () => {
-        console.log("[Ash] WebSocket connected");
         setIsConnected(true);
         setErrorMessage(null);
       };
 
       ws.onclose = () => {
-        console.log("[Ash] WebSocket disconnected");
         setIsConnected(false);
-        reconnectTimeoutRef.current = window.setTimeout(() => {
-          console.log("[Ash] Attempting reconnect...");
-          connect();
-        }, RECONNECT_DELAY);
+        reconnectTimerRef.current = window.setTimeout(connectToAshBackend, WEBSOCKET_RECONNECT_DELAY_MS);
       };
 
-      ws.onerror = (error) => {
-        console.error("[Ash] WebSocket error:", error);
+      ws.onerror = () => {
         setErrorMessage("Connection to Ash backend failed");
       };
 
       ws.onmessage = (event: MessageEvent) => {
         try {
-          const data: unknown = JSON.parse(event.data as string);
-          handleMessage(data as Parameters<typeof handleMessage>[0]);
+          handleIncomingWebSocketFrame(JSON.parse(event.data as string) as IncomingWebSocketFrame);
         } catch (err) {
-          console.error("[Ash] Failed to parse message:", err);
+          console.error("[Ash] Failed to parse WebSocket frame:", err);
         }
       };
 
       wsRef.current = ws;
     };
 
-    connect();
+    connectToAshBackend();
 
     return () => {
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       ws?.close();
     };
-  }, [handleMessage]);
-
-  // ---------------------------------------------------------------------------
-  // Send Message
-  // ---------------------------------------------------------------------------
+  }, [handleIncomingWebSocketFrame]);
 
   const sendMessage = useCallback(
     async (text: string) => {
@@ -330,27 +266,20 @@ export function useChat({
 
       setErrorMessage(null);
       setIsStreaming(true);
-      setServitorResult(null);
-      setServitorPending(false);
+      setServitorAuditResult(null);
+      setServitorAuditPending(false);
 
-      // Clear the stale request ID immediately — the backend will stamp a new one
-      // in its request_accepted frame before any audio frames arrive.
       currentRequestIdRef.current = null;
       setCurrentRequestId(null);
 
-      const userMessage = createMessage("user", trimmedText);
-      const assistantMessageId = crypto.randomUUID();
-      currentAssistantIdRef.current = assistantMessageId;
+      const userMessage       = buildChatMessage("user", trimmedText);
+      const assistantPlaceholderId = crypto.randomUUID();
+      currentAssistantIdRef.current = assistantPlaceholderId;
 
       setMessages((prev) => [
         ...prev,
         userMessage,
-        {
-          id: assistantMessageId,
-          role: "assistant",
-          content: "",
-          createdAt: Date.now(),
-        },
+        { id: assistantPlaceholderId, role: "assistant", content: "", createdAt: Date.now() },
       ]);
 
       wsRef.current.send(JSON.stringify({ message: trimmedText }));
@@ -358,13 +287,9 @@ export function useChat({
     [isStreaming]
   );
 
-  // ---------------------------------------------------------------------------
-  // Dismiss Servitor
-  // ---------------------------------------------------------------------------
-
-  const dismissServitor = useCallback(() => {
-    setServitorResult(null);
-    setServitorPending(false);
+  const dismissServitorPanel = useCallback(() => {
+    setServitorAuditResult(null);
+    setServitorAuditPending(false);
   }, []);
 
   return {
@@ -374,13 +299,13 @@ export function useChat({
     isStreaming,
     errorMessage,
     isConnected,
-    servitorPending,
-    servitorResult,
+    servitorAuditPending,
+    servitorAuditResult,
     currentRequestId,
     setSelectedModel,
     sendMessage,
     setMessages,
-    dismissServitor,
-    sendPlaybackComplete,
+    dismissServitorPanel,
+    sendVerityPlaybackComplete,
   };
 }
